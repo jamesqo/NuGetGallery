@@ -6,9 +6,11 @@ using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
+using System.Web;
 using System.Web.Mvc;
 using NuGetGallery.Authentication;
 using NuGetGallery.Filters;
+using NuGetGallery.Security;
 
 namespace NuGetGallery
 {
@@ -20,8 +22,19 @@ namespace NuGetGallery
             ICuratedFeedService curatedFeedService,
             IMessageService messageService,
             IUserService userService,
-            ITelemetryService telemetryService)
-            : base(authService, curatedFeedService, messageService, userService, telemetryService)
+            ITelemetryService telemetryService,
+            ISecurityPolicyService securityPolicyService,
+            ICertificateService certificateService,
+            IPackageService packageService)
+            : base(
+                  authService,
+                  curatedFeedService,
+                  messageService,
+                  userService,
+                  telemetryService,
+                  securityPolicyService,
+                  certificateService,
+                  packageService)
         {
         }
 
@@ -252,8 +265,8 @@ namespace NuGetGallery
 
             var currentUser = GetCurrentUser();
 
-            if (account == null || 
-                (currentUser.Username != memberName && 
+            if (account == null ||
+                (currentUser.Username != memberName &&
                 ActionsRequiringPermissions.ManageMembership.CheckPermissions(currentUser, account)
                     != PermissionsCheckResult.Allowed))
             {
@@ -277,6 +290,70 @@ namespace NuGetGallery
             }
         }
 
+        [AcceptVerbs(HttpVerbs.Get | HttpVerbs.Post)]
+        [UIAuthorize]
+        [ValidateAjaxAntiForgeryToken(HttpVerbs.Post)]
+        [RequiresAccountConfirmation("add or get certificates")]
+        public virtual async Task<JsonResult> AddOrGetCertificates(string accountName, HttpPostedFileBase uploadFile)
+        {
+            var currentUser = GetCurrentUser();
+            var organization = GetAccount(accountName);
+
+            if (currentUser == null)
+            {
+                return Json(HttpStatusCode.Unauthorized, obj: null);
+            }
+
+            if (organization == null)
+            {
+                return Json(HttpStatusCode.NotFound, obj: null);
+            }
+
+            if (Request.Is(HttpVerbs.Post))
+            {
+                if (organization == null ||
+                    ActionsRequiringPermissions.ManageCertificate.CheckPermissions(currentUser, organization)
+                        != PermissionsCheckResult.Allowed)
+                {
+                    return Json(HttpStatusCode.Forbidden, Strings.Unauthorized);
+                }
+
+                return await AddCertificateAsync(uploadFile, organization);
+            }
+
+            var template = Url.OrganizationCertificateTemplate(accountName);
+
+            return GetActiveCertificates(organization, template);
+        }
+
+        [AcceptVerbs(HttpVerbs.Get | HttpVerbs.Delete)]
+        [UIAuthorize]
+        [ValidateAjaxAntiForgeryToken(HttpVerbs.Delete)]
+        [RequiresAccountConfirmation("get or remove a certificate")]
+        public virtual async Task<JsonResult> GetOrRemoveCertificate(string accountName, string thumbprint)
+        {
+            var currentUser = GetCurrentUser();
+            var organization = GetAccount(accountName);
+
+            if (Request.Is(HttpVerbs.Delete))
+            {
+                if (organization == null ||
+                    ActionsRequiringPermissions.ManageCertificate.CheckPermissions(currentUser, organization)
+                        != PermissionsCheckResult.Allowed)
+                {
+                    return Json(HttpStatusCode.Forbidden, Strings.Unauthorized);
+                }
+
+                await CertificateService.DeactivateCertificateAsync(thumbprint, organization);
+
+                return Json(HttpStatusCode.OK, new { });
+            }
+
+            var template = Url.OrganizationCertificateTemplate(accountName);
+
+            return GetActiveCertificate(thumbprint, organization, template);
+        }
+
         protected override void UpdateAccountViewModel(Organization account, OrganizationAccountViewModel model)
         {
             base.UpdateAccountViewModel(account, model);
@@ -288,8 +365,8 @@ namespace NuGetGallery
             model.RequiresTenant = account.IsRestrictedToOrganizationTenantPolicy();
 
             model.CanManageMemberships = 
-                ActionsRequiringPermissions.ManageMembership.CheckPermissions(GetCurrentUser(), account) == 
-                PermissionsCheckResult.Allowed;
+                ActionsRequiringPermissions.ManageMembership.CheckPermissions(GetCurrentUser(), account)
+                    == PermissionsCheckResult.Allowed;
         }
     }
 }

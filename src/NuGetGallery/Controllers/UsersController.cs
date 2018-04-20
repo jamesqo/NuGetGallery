@@ -7,6 +7,7 @@ using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
+using System.Web;
 using System.Web.Mvc;
 using NuGetGallery.Areas.Admin;
 using NuGetGallery.Areas.Admin.Models;
@@ -15,13 +16,13 @@ using NuGetGallery.Authentication;
 using NuGetGallery.Configuration;
 using NuGetGallery.Filters;
 using NuGetGallery.Infrastructure.Authentication;
+using NuGetGallery.Security;
 
 namespace NuGetGallery
 {
     public partial class UsersController
         : AccountsController<User, UserAccountViewModel>
     {
-        private readonly IPackageService _packageService;
         private readonly IPackageOwnerRequestService _packageOwnerRequestService;
         private readonly IAppConfiguration _config;
         private readonly ICredentialBuilder _credentialBuilder;
@@ -39,10 +40,19 @@ namespace NuGetGallery
             ICredentialBuilder credentialBuilder,
             IDeleteAccountService deleteAccountService,
             ISupportRequestService supportRequestService,
-            ITelemetryService telemetryService)
-            : base(authService, feedsQuery, messageService, userService, telemetryService)
+            ITelemetryService telemetryService,
+            ISecurityPolicyService securityPolicyService,
+            ICertificateService certificateService)
+            : base(
+                  authService,
+                  feedsQuery,
+                  messageService,
+                  userService,
+                  telemetryService,
+                  securityPolicyService,
+                  certificateService,
+                  packageService)
         {
-            _packageService = packageService ?? throw new ArgumentNullException(nameof(packageService));
             _packageOwnerRequestService = packageOwnerRequestService ?? throw new ArgumentNullException(nameof(packageOwnerRequestService));
             _config = config ?? throw new ArgumentNullException(nameof(config));
             _credentialBuilder = credentialBuilder ?? throw new ArgumentNullException(nameof(credentialBuilder));
@@ -277,7 +287,7 @@ namespace NuGetGallery
                 return HttpNotFound("User not found.");
             }
 
-            var listPackageItems = _packageService
+            var listPackageItems = PackageService
                  .FindPackagesByAnyMatchingOwner(currentUser, includeUnlisted: true)
                  .Select(p => new ListPackageItemViewModel(p, currentUser))
                  .ToList();
@@ -331,7 +341,7 @@ namespace NuGetGallery
                 return HttpNotFound("User not found.");
             }
 
-            var listPackageItems = _packageService
+            var listPackageItems = PackageService
                  .FindPackagesByAnyMatchingOwner(user, includeUnlisted: true)
                  .Select(p => new ListPackageItemViewModel(p, currentUser))
                  .ToList();
@@ -410,7 +420,7 @@ namespace NuGetGallery
                 ActionsRequiringPermissions.UploadNewPackageId.IsAllowedOnBehalfOfAccount(currentUser, account),
                 ActionsRequiringPermissions.UploadNewPackageVersion.IsAllowedOnBehalfOfAccount(currentUser, account),
                 ActionsRequiringPermissions.UnlistOrRelistPackage.IsAllowedOnBehalfOfAccount(currentUser, account),
-                packageIds: _packageService.FindPackageRegistrationsByOwner(account)
+                packageIds: PackageService.FindPackageRegistrationsByOwner(account)
                                 .Select(p => p.Id)
                                 .OrderBy(i => i)
                                 .ToList());
@@ -440,14 +450,14 @@ namespace NuGetGallery
                 new ListPackageOwnerViewModel(currentUser)
             }.Concat(currentUser.Organizations.Select(o => new ListPackageOwnerViewModel(o.Organization)));
 
-            var packages = _packageService.FindPackagesByAnyMatchingOwner(currentUser, includeUnlisted: true);
+            var packages = PackageService.FindPackagesByAnyMatchingOwner(currentUser, includeUnlisted: true);
             var listedPackages = packages
                 .Where(p => p.Listed)
-                .Select(p => new ListPackageItemViewModel(p, currentUser)).OrderBy(p => p.Id)
+                .Select(p => new ListPackageItemRequiredSignerViewModel(p, currentUser, SecurityPolicyService)).OrderBy(p => p.Id)
                 .ToList();
             var unlistedPackages = packages
                 .Where(p => !p.Listed)
-                .Select(p => new ListPackageItemViewModel(p, currentUser)).OrderBy(p => p.Id)
+                .Select(p => new ListPackageItemRequiredSignerViewModel(p, currentUser, SecurityPolicyService)).OrderBy(p => p.Id)
                 .ToList();
 
             // find all received ownership requests
@@ -464,7 +474,7 @@ namespace NuGetGallery
                 .SelectMany(m => _packageOwnerRequestService.GetPackageOwnershipRequests(requestingOwner: m.Organization));
             var sent = userSent.Union(orgSent);
 
-            var ownerRequests = new OwnerRequestsViewModel(received, sent, currentUser, _packageService);
+            var ownerRequests = new OwnerRequestsViewModel(received, sent, currentUser, PackageService);
 
             var userReservedNamespaces = currentUser.ReservedNamespaces;
             var organizationsReservedNamespaces = currentUser.Organizations.SelectMany(m => m.Organization.ReservedNamespaces);
@@ -488,7 +498,7 @@ namespace NuGetGallery
         {
             var currentUser = GetCurrentUser();
 
-            var model = new ManageOrganizationsViewModel(currentUser, _packageService);
+            var model = new ManageOrganizationsViewModel(currentUser, PackageService);
 
             return View(model);
         }
@@ -609,7 +619,7 @@ namespace NuGetGallery
                 return HttpNotFound();
             }
 
-            var packages = _packageService.FindPackagesByOwner(user, includeUnlisted: false)
+            var packages = PackageService.FindPackagesByOwner(user, includeUnlisted: false)
                 .OrderByDescending(p => p.PackageRegistration.DownloadCount)
                 .Select(p => new ListPackageItemViewModel(p, currentUser)
                 {
@@ -835,6 +845,54 @@ namespace NuGetGallery
             var credentialViewModel = AuthenticationService.DescribeCredential(cred);
 
             return Json(new ApiKeyViewModel(credentialViewModel));
+        }
+
+        [AcceptVerbs(HttpVerbs.Get | HttpVerbs.Post)]
+        [UIAuthorize]
+        [ValidateAjaxAntiForgeryToken(HttpVerbs.Post)]
+        [RequiresAccountConfirmation("add or get certificates")]
+        public virtual async Task<JsonResult> AddOrGetCertificates(HttpPostedFileBase uploadFile)
+        {
+            var currentUser = GetCurrentUser();
+
+            if (currentUser == null || currentUser.IsDeleted)
+            {
+                return Json(HttpStatusCode.Unauthorized, obj: null);
+            }
+
+            if (Request.Is(HttpVerbs.Post))
+            {
+                return await AddCertificateAsync(uploadFile, currentUser);
+            }
+
+            var template = Url.UserCertificateTemplate();
+
+            return GetActiveCertificates(currentUser, template);
+        }
+
+        [AcceptVerbs(HttpVerbs.Get | HttpVerbs.Delete)]
+        [UIAuthorize]
+        [ValidateAjaxAntiForgeryToken(HttpVerbs.Delete)]
+        [RequiresAccountConfirmation("get or remove a certificate")]
+        public virtual async Task<JsonResult> GetOrRemoveCertificate(string thumbprint)
+        {
+            var currentUser = GetCurrentUser();
+
+            if (currentUser == null || currentUser.IsDeleted)
+            {
+                return Json(HttpStatusCode.Unauthorized, obj: null);
+            }
+
+            if (Request.Is(HttpVerbs.Delete))
+            {
+                await CertificateService.DeactivateCertificateAsync(thumbprint, currentUser);
+
+                return Json(HttpStatusCode.OK, new { });
+            }
+
+            var template = Url.UserCertificateTemplate();
+
+            return GetActiveCertificate(thumbprint, currentUser, template);
         }
 
         private async Task<CredentialViewModel> GenerateApiKeyInternal(string description, ICollection<Scope> scopes, TimeSpan? expiration)

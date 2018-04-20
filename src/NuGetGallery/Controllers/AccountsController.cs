@@ -5,9 +5,12 @@ using System;
 using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
+using System.Web;
 using System.Web.Mvc;
 using NuGetGallery.Authentication;
 using NuGetGallery.Filters;
+using NuGetGallery.Helpers;
+using NuGetGallery.Security;
 
 namespace NuGetGallery
 {
@@ -34,18 +37,30 @@ namespace NuGetGallery
 
         public ITelemetryService TelemetryService { get; }
 
+        public ISecurityPolicyService SecurityPolicyService { get; }
+
+        public ICertificateService CertificateService { get; }
+
+        public IPackageService PackageService { get; }
+
         public AccountsController(
             AuthenticationService authenticationService,
             ICuratedFeedService curatedFeedService,
             IMessageService messageService,
             IUserService userService,
-            ITelemetryService telemetryService)
+            ITelemetryService telemetryService,
+            ISecurityPolicyService securityPolicyService,
+            ICertificateService certificateService,
+            IPackageService packageService)
         {
             AuthenticationService = authenticationService ?? throw new ArgumentNullException(nameof(authenticationService));
             CuratedFeedService = curatedFeedService ?? throw new ArgumentNullException(nameof(curatedFeedService));
             MessageService = messageService ?? throw new ArgumentNullException(nameof(messageService));
             UserService = userService ?? throw new ArgumentNullException(nameof(userService));
             TelemetryService = telemetryService ?? throw new ArgumentNullException(nameof(telemetryService));
+            SecurityPolicyService = securityPolicyService ?? throw new ArgumentNullException(nameof(securityPolicyService));
+            CertificateService = certificateService ?? throw new ArgumentNullException(nameof(certificateService));
+            PackageService = packageService ?? throw new ArgumentNullException(nameof(packageService));
         }
 
         public abstract string AccountAction { get; }
@@ -83,7 +98,7 @@ namespace NuGetGallery
             {
                 return new HttpStatusCodeResult(HttpStatusCode.Forbidden, Strings.Unauthorized);
             }
-            
+
             var alreadyConfirmed = account.UnconfirmedEmailAddress == null;
 
             ConfirmationViewModel model;
@@ -200,14 +215,14 @@ namespace NuGetGallery
             {
                 return AccountView(account, model);
             }
-            
+
             if (account.HasPasswordCredential())
             {
                 if (!ModelState.IsValidField("ChangeEmail.Password"))
                 {
                     return AccountView(account, model);
                 }
-                
+
                 if (!AuthenticationService.ValidatePasswordCredential(account.Credentials, model.ChangeEmail.Password, out var _))
                 {
                     ModelState.AddModelError("ChangeEmail.Password", Strings.CurrentPasswordIncorrect);
@@ -282,7 +297,7 @@ namespace NuGetGallery
             }
 
             model = model ?? Activator.CreateInstance<TAccountViewModel>();
-            
+
             UpdateAccountViewModel(account, model);
 
             return View(AccountAction, model);
@@ -311,6 +326,69 @@ namespace NuGetGallery
             model.ChangeNotifications = model.ChangeNotifications ?? new ChangeNotificationsViewModel();
             model.ChangeNotifications.EmailAllowed = account.EmailAllowed;
             model.ChangeNotifications.NotifyPackagePushed = account.NotifyPackagePushed;
+        }
+
+        protected async Task<JsonResult> AddCertificateAsync(HttpPostedFileBase uploadFile, User account)
+        {
+            if (uploadFile == null)
+            {
+                return Json(HttpStatusCode.BadRequest, new[] { Strings.CertificateFileIsRequired });
+            }
+
+            Certificate certificate;
+
+            try
+            {
+                using (var uploadStream = uploadFile.InputStream)
+                {
+                    certificate = await CertificateService.AddCertificateAsync(uploadFile);
+                }
+
+                await CertificateService.ActivateCertificateAsync(certificate.Thumbprint, account);
+            }
+            catch (Exception ex)
+            {
+                ex.Log();
+
+                return Json(HttpStatusCode.BadRequest, new[] { ex.Message });
+            }
+
+            var activeCertificateCount = CertificateService.GetActiveCertificates(account).Count();
+
+            if (activeCertificateCount == 1 &&
+                SecurityPolicyService.IsSubscribed(account, AutomaticallyOverwriteRequiredSignerPolicy.PolicyName))
+            {
+                await PackageService.SetRequiredSignerAsync(account);
+            }
+
+            return Json(HttpStatusCode.Created, new { certificate.Thumbprint });
+        }
+
+        protected JsonResult GetActiveCertificate(string thumbprint, User account, RouteUrlTemplate<string> template)
+        {
+            var certificates = CertificateService.GetActiveCertificates(account)
+                .Where(certificate => certificate.Thumbprint == thumbprint)
+                .Select(certificate =>
+                {
+                    var deactivateUrl = template.Resolve(certificate.Thumbprint);
+
+                    return new ListCertificateItemViewModel(certificate, deactivateUrl);
+                });
+
+            return Json(HttpStatusCode.OK, certificates, JsonRequestBehavior.AllowGet);
+        }
+
+        protected JsonResult GetActiveCertificates(User account, RouteUrlTemplate<string> template)
+        {
+            var certificates = CertificateService.GetActiveCertificates(account)
+                .Select(certificate =>
+                {
+                    var deactivateUrl = template.Resolve(certificate.Thumbprint);
+
+                    return new ListCertificateItemViewModel(certificate, deactivateUrl);
+                });
+
+            return Json(HttpStatusCode.OK, certificates, JsonRequestBehavior.AllowGet);
         }
     }
 }

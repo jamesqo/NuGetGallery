@@ -86,5 +86,24 @@ namespace NuGetGallery
         /// <param name="package">The package.</param>
         /// <returns>The list of package owners that are not organizations.</returns>
         IEnumerable<User> GetPackageUserAccountOwners(Package package);
+
+        /// <summary>
+        /// Sets the required signer on all owned package registrations.
+        /// </summary>
+        /// <param name="signer">A signer or <c>null</c> if none.</param>
+        /// <returns>A task that represents the asynchronous operation.</returns>
+        /// <exception cref="ArgumentNullException">Thrown if <paramref name="signer" />
+        /// is <c>null</c>.</exception>
+        Task SetRequiredSignerAsync(User signer);
+
+        /// <summary>
+        /// Sets the required signer on an owned package registration.
+        /// </summary>
+        /// <param name="registration">A package registration.</param>
+        /// <param name="signer">A signer or <c>null</c> if none.</param>
+        /// <returns>A task that represents the asynchronous operation.</returns>
+        /// <exception cref="ArgumentNullException">Thrown if <paramref name="registration" />
+        /// is <c>null</c>.</exception>
+        Task SetRequiredSignerAsync(PackageRegistration registration, User signer);
     }
 }

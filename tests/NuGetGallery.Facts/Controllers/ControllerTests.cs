@@ -31,7 +31,7 @@ namespace NuGetGallery.Controllers
                 Controller = method.DeclaringType;
                 Name = method.Name;
             }
-            
+
             public bool Equals(ControllerActionRuleException other)
             {
                 return other != null && other.Controller == Controller && other.Name == Name;
@@ -89,7 +89,34 @@ namespace NuGetGallery.Controllers
 
             // Assert
             var actionsMissingAntiForgeryToken = actions
-                .Where(m => !(m.GetCustomAttributes().Any(a => a.GetType() == typeof(ValidateAntiForgeryTokenAttribute))));
+                .Where(m =>
+                {
+                    var lacksVaftAttribute = !(m.GetCustomAttributes().Any(a => a.GetType() == typeof(ValidateAntiForgeryTokenAttribute)));
+
+                    if (!lacksVaftAttribute)
+                    {
+                        return false;
+                    }
+
+                    var vaaftAttribute = m.GetCustomAttribute<ValidateAjaxAntiForgeryTokenAttribute>();
+
+                    if (vaaftAttribute != null)
+                    {
+                        if (!vaaftAttribute.OnVerbs.HasValue)
+                        {
+                            return false;
+                        }
+
+                        var supportedVerbs = GetSupportedHttpVerbsThatRequireAntiForgeryTokenValidation(m);
+
+                        if ((supportedVerbs & vaaftAttribute.OnVerbs.Value) == supportedVerbs)
+                        {
+                            return false;
+                        }
+                    }
+
+                    return lacksVaftAttribute;
+                });
 
             Assert.Empty(actionsMissingAntiForgeryToken);
         }
@@ -98,7 +125,7 @@ namespace NuGetGallery.Controllers
         public void AllActionsHaveUIAuthorizeAttribute()
         {
             // Arrange
-            
+
             // These actions are allowed to continue to support a discontinued login.
             var expectedActionsSupportingDiscontinuedLogins = new ControllerActionRuleException[]
             {
@@ -118,7 +145,7 @@ namespace NuGetGallery.Controllers
             var actions = GetAllActions();
 
             // Assert
-            
+
             // No actions should have the base authorize attribute!
             var actionsWithBaseAuthorizeAttribute = actions
                 .Where(m => m.GetCustomAttributes().Any(a => a.GetType() == typeof(AuthorizeAttribute)));
@@ -152,6 +179,55 @@ namespace NuGetGallery.Controllers
                     var possibleException = new ControllerActionRuleException(m);
                     return !exceptions?.Any(a => a.Equals(possibleException)) ?? true;
                 });
+        }
+
+        private static HttpVerbs GetSupportedHttpVerbsThatRequireAntiForgeryTokenValidation(MethodInfo methodInfo)
+        {
+            HttpVerbs verbs = (HttpVerbs)0;
+
+            var attributes = methodInfo.GetCustomAttributes();
+
+            foreach (var attribute in attributes)
+            {
+                if (attribute is AcceptVerbsAttribute)
+                {
+                    var acceptVerbsAttribute = (AcceptVerbsAttribute)attribute;
+
+                    foreach (var verb in acceptVerbsAttribute.Verbs)
+                    {
+                        var parsedVerb = (HttpVerbs)Enum.Parse(typeof(HttpVerbs), verb, ignoreCase: true);
+
+                        if (parsedVerb != HttpVerbs.Get && parsedVerb != HttpVerbs.Head)
+                        {
+                            verbs |= parsedVerb;
+                        }
+                    }
+
+                    return verbs;
+                }
+                else if (attribute is HttpPostAttribute)
+                {
+                    verbs |= HttpVerbs.Post;
+                }
+                else if (attribute is HttpPutAttribute)
+                {
+                    verbs |= HttpVerbs.Put;
+                }
+                else if (attribute is HttpDeleteAttribute)
+                {
+                    verbs |= HttpVerbs.Delete;
+                }
+                else if (attribute is HttpPatchAttribute)
+                {
+                    verbs |= HttpVerbs.Patch;
+                }
+                else if (attribute is HttpOptionsAttribute)
+                {
+                    verbs |= HttpVerbs.Options;
+                }
+            }
+
+            return verbs;
         }
     }
 }

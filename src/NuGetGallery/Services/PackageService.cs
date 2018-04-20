@@ -220,7 +220,7 @@ namespace NuGetGallery
 
         public IEnumerable<Package> FindPackagesByOwner(User user, bool includeUnlisted, bool includeVersions = false)
         {
-            return GetPackagesForOwners(new [] { user.Key }, includeUnlisted, includeVersions);
+            return GetPackagesForOwners(new[] { user.Key }, includeUnlisted, includeVersions);
         }
 
         /// <summary>
@@ -430,7 +430,7 @@ namespace NuGetGallery
         private PackageRegistration CreateOrGetPackageRegistration(User owner, User currentUser, PackageMetadata packageMetadata, bool isVerified)
         {
             var packageRegistration = FindPackageRegistrationById(packageMetadata.Id);
-            
+
             if (packageRegistration == null)
             {
                 if (_packageNamingConflictValidator.IdConflictsWithExistingPackageTitle(packageMetadata.Id))
@@ -705,6 +705,114 @@ namespace NuGetGallery
                     .ForEach(pru => pru.IsVerified = isVerified);
 
                 await _packageRegistrationRepository.CommitChangesAsync();
+            }
+        }
+
+        public async Task SetRequiredSignerAsync(User signer)
+        {
+            if (signer == null)
+            {
+                throw new ArgumentNullException(nameof(signer));
+            }
+
+            var registrations = FindPackageRegistrationsByOwner(signer);
+            var auditRecords = new List<PackageRegistrationAuditRecord>();
+            var packageIds = new List<string>();
+            var isCommitRequired = false;
+
+            foreach (var registration in registrations)
+            {
+                string previousRequiredSigner = null;
+                string newRequiredSigner = null;
+
+                if (!registration.RequiredSigners.Contains(signer))
+                {
+                    previousRequiredSigner = registration.RequiredSigners.FirstOrDefault()?.Username;
+
+                    registration.RequiredSigners.Clear();
+
+                    isCommitRequired = true;
+
+                    registration.RequiredSigners.Add(signer);
+
+                    newRequiredSigner = signer.Username;
+
+                    var auditRecord = PackageRegistrationAuditRecord.CreateForSetRequiredSigner(
+                        registration,
+                        previousRequiredSigner,
+                        newRequiredSigner);
+
+                    auditRecords.Add(auditRecord);
+                    packageIds.Add(registration.Id);
+                }
+            }
+
+            if (isCommitRequired)
+            {
+                await _packageRegistrationRepository.CommitChangesAsync();
+
+                foreach (var auditRecord in auditRecords)
+                {
+                    await _auditingService.SaveAuditRecordAsync(auditRecord);
+                }
+
+                foreach (var packageId in packageIds)
+                {
+                    _telemetryService.TrackRequiredSignerSet(packageId);
+                }
+            }
+        }
+
+        public async Task SetRequiredSignerAsync(PackageRegistration registration, User signer)
+        {
+            if (registration == null)
+            {
+                throw new ArgumentNullException(nameof(registration));
+            }
+
+            var isCommitRequired = false;
+
+            string previousRequiredSigner = null;
+            string newRequiredSigner = null;
+
+            if (signer == null)
+            {
+                var currentRequiredSigner = registration.RequiredSigners.FirstOrDefault();
+
+                if (currentRequiredSigner != null)
+                {
+                    previousRequiredSigner = currentRequiredSigner.Username;
+
+                    registration.RequiredSigners.Clear();
+
+                    isCommitRequired = true;
+                }
+            }
+            else if (!registration.RequiredSigners.Contains(signer))
+            {
+                previousRequiredSigner = registration.RequiredSigners.FirstOrDefault()?.Username;
+
+                registration.RequiredSigners.Clear();
+
+                isCommitRequired = true;
+
+                registration.RequiredSigners.Add(signer);
+
+                newRequiredSigner = signer.Username;
+            }
+
+            if (isCommitRequired)
+            {
+                await _packageRegistrationRepository.CommitChangesAsync();
+
+                var auditRecord = PackageRegistrationAuditRecord.CreateForSetRequiredSigner(
+                    registration,
+                    previousRequiredSigner,
+                    newRequiredSigner);
+
+                await _auditingService.SaveAuditRecordAsync(auditRecord);
+
+                _telemetryService.TrackRequiredSignerSet(registration.Id);
             }
         }
     }
