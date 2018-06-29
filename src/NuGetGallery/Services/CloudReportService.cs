@@ -6,26 +6,30 @@ using System.Threading.Tasks;
 using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Blob;
 using Microsoft.WindowsAzure.Storage.RetryPolicies;
+using NuGetGallery.Configuration;
 
 namespace NuGetGallery
 {
-    public class CloudReportService : IReportService
+    public class CloudReportService<TContainer> : IReportService<TContainer>, ICloudStorageStatusDependency
+        where TContainer : IReportContainer, new()
     {
         private readonly string _connectionString;
         private readonly bool _readAccessGeoRedundant;
+        private readonly CloudBlobContainer _cloudContainer;
 
-        public CloudReportService(string connectionString, bool readAccessGeoRedundant)
+        public CloudReportService(IAppConfiguration configuration)
         {
-            _connectionString = connectionString;
-            _readAccessGeoRedundant = readAccessGeoRedundant;
+            if (configuration == null)
+            {
+                throw new ArgumentNullException(nameof(configuration));
+            }
+
+            _connectionString = configuration.AzureStorage_Statistics_ConnectionString;
+            _readAccessGeoRedundant = configuration.AzureStorageReadAccessGeoRedundant;
+            _cloudContainer = GetCloudBlobContainer();
         }
 
-        public IReportContainer GetContainer(string containerName)
-        {
-            return new Container(GetCloudBlobContainer(containerName));
-        }
-
-        private CloudBlobContainer GetCloudBlobContainer(string containerName)
+        private CloudBlobContainer GetCloudBlobContainer()
         {
             var storageAccount = CloudStorageAccount.Parse(_connectionString);
             var blobClient = storageAccount.CreateCloudBlobClient();
@@ -35,37 +39,28 @@ namespace NuGetGallery
                 blobClient.DefaultRequestOptions.LocationMode = LocationMode.PrimaryThenSecondary;
             }
 
+            string containerName = new TContainer().Name;
             return blobClient.GetContainerReference(containerName);
         }
 
-        private class Container : IReportContainer
+        public Task<bool> IsAvailableAsync() => _cloudContainer.ExistsAsync();
+
+        public async Task<ReportBlob> Load(string reportName)
         {
-            private readonly CloudBlobContainer _container;
+            // In NuGet we always use lowercase names for all blobs in Azure Storage
+            reportName = reportName.ToLowerInvariant();
+            var blob = _cloudContainer.GetBlockBlobReference(reportName);
 
-            public Container(CloudBlobContainer container)
+            // Check if the report blob is present before processing it.
+            if (!blob.Exists())
             {
-                _container = container ?? throw new ArgumentNullException(nameof(container));
+                throw new ReportNotFoundException();
             }
 
-            public Task<bool> IsAvailableAsync() => _container.ExistsAsync();
+            await blob.FetchAttributesAsync();
+            string content = await blob.DownloadTextAsync();
 
-            public async Task<ReportBlob> Load(string reportName)
-            {
-                // In NuGet we always use lowercase names for all blobs in Azure Storage
-                reportName = reportName.ToLowerInvariant();
-                var blob = _container.GetBlockBlobReference(reportName);
-
-                // Check if the report blob is present before processing it.
-                if (!blob.Exists())
-                {
-                    throw new ReportNotFoundException();
-                }
-
-                await blob.FetchAttributesAsync();
-                string content = await blob.DownloadTextAsync();
-
-                return new ReportBlob(content, blob.Properties.LastModified?.UtcDateTime);
-            }
+            return new ReportBlob(content, blob.Properties.LastModified?.UtcDateTime);
         }
     }
 }

@@ -521,9 +521,9 @@ namespace NuGetGallery
                 }
             }
 
-            builder.RegisterType<LocalReportService>()
+            builder.RegisterGeneric(typeof(LocalReportService<>))
                 .AsSelf()
-                .As<IReportService>()
+                .As(typeof(IReportService<>))
                 .InstancePerLifetimeScope();
 
             builder.RegisterInstance(NullStatisticsService.Instance)
@@ -605,9 +605,9 @@ namespace NuGetGallery
                 .SingleInstance();
 
             // when running on Windows Azure, pull the statistics from the warehouse via storage
-            builder.RegisterInstance(new CloudReportService(configuration.Current.AzureStorage_Statistics_ConnectionString, configuration.Current.AzureStorageReadAccessGeoRedundant))
+            builder.RegisterGeneric(typeof(CloudReportService<>))
                 .AsSelf()
-                .As<IReportService>()
+                .As(typeof(IReportService<>))
                 .As<ICloudStorageStatusDependency>()
                 .SingleInstance();
 

@@ -8,54 +8,35 @@ using System.Threading.Tasks;
 
 namespace NuGetGallery
 {
-    public class LocalReportService : IReportService
+    public class LocalReportService<TContainer> : IReportService<TContainer>
+        where TContainer : IReportContainer, new()
     {
+        private const string RootFolder = "Reports";
+
+        private readonly IFileStorageService _fileStorage;
+
         public LocalReportService(
             IFileStorageService fileStorage)
         {
-            FileStorage = fileStorage ?? throw new ArgumentNullException(nameof(fileStorage));
+            _fileStorage = fileStorage ?? throw new ArgumentNullException(nameof(fileStorage));
         }
 
-        private IFileStorageService FileStorage { get; }
-
-        public IReportContainer GetContainer(string containerName)
+        public async Task<ReportBlob> Load(string reportName)
         {
-            return new Container(this, containerName);
-        }
+            string containerName = new TContainer().Name;
+            string folderName = Path.Combine(RootFolder, containerName);
 
-        private class Container : IReportContainer
-        {
-            private const string RootFolder = "Reports";
-
-            private readonly LocalReportService _parent;
-            private readonly string _containerName;
-
-            public Container(LocalReportService parent, string containerName)
+            using (var stream = await _fileStorage.GetFileAsync(folderName, fileName: reportName))
             {
-                _parent = parent;
-                _containerName = containerName;
-            }
-
-            public Task<bool> IsAvailableAsync()
-            {
-                throw new NotImplementedException();
-            }
-
-            public async Task<ReportBlob> Load(string reportName)
-            {
-                string folderName = Path.Combine(RootFolder, _containerName);
-                using (var stream = await _parent.FileStorage.GetFileAsync(folderName, fileName: reportName))
+                if (stream == null)
                 {
-                    if (stream == null)
-                    {
-                        throw new ReportNotFoundException();
-                    }
+                    throw new ReportNotFoundException();
+                }
 
-                    using (var reader = new StreamReader(stream))
-                    {
-                        string content = await reader.ReadToEndAsync();
-                        return new ReportBlob(content);
-                    }
+                using (var reader = new StreamReader(stream))
+                {
+                    string content = await reader.ReadToEndAsync();
+                    return new ReportBlob(content);
                 }
             }
         }

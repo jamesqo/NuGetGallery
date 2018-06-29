@@ -10,16 +10,16 @@ using System.Threading.Tasks;
 using Microsoft.WindowsAzure.Storage;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using NuGetGallery.Infrastructure.Cloud;
 
 namespace NuGetGallery
 {
     public class JsonStatisticsService : IStatisticsService
     {
-        internal const string ContainerName = "nuget-cdnstats";
         private const string RecentPopularityDetailBlobNameFormat = "recentpopularity/{0}{1}.json";
 
         /// <summary>
-        /// How often statistics reports should be refreshed using the <see cref="_reportContainer"/>.
+        /// How often statistics reports should be refreshed using the <see cref="_reportService"/>.
         /// </summary>
         private readonly TimeSpan _refreshInterval = TimeSpan.FromHours(1);
 
@@ -29,9 +29,9 @@ namespace NuGetGallery
         private DateTime? _lastRefresh = null;
 
         /// <summary>
-        /// The container used to load reports in the form of JSON blobs.
+        /// The service used to load reports in the form of JSON blobs.
         /// </summary>
-        private readonly IReportContainer _reportContainer;
+        private readonly IReportService<StatsContainer> _reportService;
 
         /// <summary>
         /// The semaphore used to update the statistics service's reports.
@@ -53,14 +53,9 @@ namespace NuGetGallery
         private readonly List<StatisticsNuGetUsageItem> _nuGetClientVersion = new List<StatisticsNuGetUsageItem>();
         private readonly List<StatisticsWeeklyUsageItem> _last6Weeks = new List<StatisticsWeeklyUsageItem>();
 
-        public JsonStatisticsService(IReportService reportService)
+        public JsonStatisticsService(IReportService<StatsContainer> reportService)
         {
-            if (reportService == null)
-            {
-                throw new ArgumentNullException(nameof(reportService));
-            }
-
-            _reportContainer = reportService.GetContainer(ContainerName);
+            _reportService = reportService ?? throw new ArgumentNullException(nameof(reportService));
         }
 
         public StatisticsReportResult PackageDownloadsResult { get; private set; }
@@ -183,7 +178,7 @@ namespace NuGetGallery
             try
             {
                 var reportName = (statisticsReportName + ".json").ToLowerInvariant();
-                var reportContent = await _reportContainer.Load(reportName);
+                var reportContent = await _reportService.Load(reportName);
                 if (reportContent == null)
                 {
                     return StatisticsReportResult.Failed;
@@ -242,7 +237,7 @@ namespace NuGetGallery
             try
             {
                 var reportName = (statisticsReportName + ".json").ToLowerInvariant();
-                var reportContent = await _reportContainer.Load(reportName);
+                var reportContent = await _reportService.Load(reportName);
                 if (reportContent == null)
                 {
                     return StatisticsReportResult.Failed;
@@ -277,7 +272,7 @@ namespace NuGetGallery
             try
             {
                 var reportName = (StatisticsReportName.NuGetClientVersion + ".json").ToLowerInvariant();
-                var reportContent = await _reportContainer.Load(reportName);
+                var reportContent = await _reportService.Load(reportName);
                 if (reportContent == null)
                 {
                     return StatisticsReportResult.Failed;
@@ -311,7 +306,7 @@ namespace NuGetGallery
             try
             {
                 var reportName = (StatisticsReportName.Last6Weeks + ".json").ToLowerInvariant();
-                var reportContent = await _reportContainer.Load(reportName);
+                var reportContent = await _reportService.Load(reportName);
                 if (reportContent == null)
                 {
                     return StatisticsReportResult.Failed;
@@ -352,7 +347,7 @@ namespace NuGetGallery
 
                 var reportName = string.Format(CultureInfo.CurrentCulture, RecentPopularityDetailBlobNameFormat,
                     StatisticsReportName.RecentPopularityDetail_, packageId).ToLowerInvariant();
-                var reportContent = await _reportContainer.Load(reportName);
+                var reportContent = await _reportService.Load(reportName);
 
                 if (reportContent == null)
                 {
@@ -369,7 +364,7 @@ namespace NuGetGallery
 
                 return report;
             }
-            catch (ReportNotFoundException)
+            catch (StatisticsReportNotFoundException)
             {
                 //do no logging and just return null. Since this exception will thrown for all packages which doesn't have downloads in last 6 weeks, we don't
                 //want to flood the elmah logs.
@@ -408,7 +403,7 @@ namespace NuGetGallery
 
                 var reportName = string.Format(CultureInfo.CurrentCulture, RecentPopularityDetailBlobNameFormat,
                     StatisticsReportName.RecentPopularityDetail_, packageId).ToLowerInvariant();
-                var reportContent = await _reportContainer.Load(reportName);
+                var reportContent = await _reportService.Load(reportName);
                 if (reportContent == null)
                 {
                     return null;
@@ -463,7 +458,7 @@ namespace NuGetGallery
             // Check if the "Items" exist before trying to access them.
             if (!data.TryGetValue("Items", out itemsToken))
             {
-                throw new ReportNotFoundException();
+                throw new StatisticsReportNotFoundException();
             }
             foreach (JObject perVersion in data["Items"])
             {
